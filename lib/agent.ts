@@ -55,6 +55,44 @@ function keychainToken(): string | null {
   }
 }
 
+// --- Usage guard (subscription/oauth only) --------------------------------
+type Usage = { weekly: number; session: number; weeklyReset?: string; sessionReset?: string; locked: boolean };
+let usageCache: { at: number; usage: Usage | null } | null = null;
+let lastWarnAt = 0;
+
+async function fetchUsage(token: string): Promise<Usage | null> {
+  try {
+    const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
+      headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as Record<string, { utilization?: number; resets_at?: string; locked_reason?: string | null }>;
+    return {
+      weekly: j.seven_day?.utilization ?? 0,
+      session: j.five_hour?.utilization ?? 0,
+      weeklyReset: j.seven_day?.resets_at,
+      sessionReset: j.five_hour?.resets_at,
+      locked: !!(j.seven_day?.locked_reason || j.five_hour?.locked_reason),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getUsage(token: string): Promise<Usage | null> {
+  if (usageCache && Date.now() - usageCache.at < 60_000) return usageCache.usage;
+  const usage = await fetchUsage(token);
+  usageCache = { at: Date.now(), usage };
+  return usage;
+}
+
+function shortTime(iso?: string): string {
+  if (!iso) return "later";
+  const d = new Date(iso);
+  const days = Math.round((d.getTime() - Date.now()) / 86_400_000);
+  return days >= 1 ? `in about ${days} day${days > 1 ? "s" : ""}` : d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
 // Prefer a console API key; otherwise fall back to the subscription token.
 function makeClient(): { client: Anthropic; oauth: boolean } | null {
   if (process.env.ANTHROPIC_API_KEY) {
@@ -90,6 +128,30 @@ export async function* runAgent(
     return;
   }
   const { client, oauth } = made;
+
+  // Usage guard: on the subscription path, refuse when the limit is hit and
+  // warn (at most every 15 min) when close, so Jarvis doesn't silently burn
+  // through the same limits the usage widget tracks.
+  if (oauth) {
+    const tok = keychainToken();
+    const u = tok ? await getUsage(tok) : null;
+    if (u) {
+      if (u.locked || u.weekly >= 100 || u.session >= 100) {
+        const which =
+          u.weekly >= 100 || (u.locked && u.weekly >= u.session)
+            ? `weekly limit (resets ${shortTime(u.weeklyReset)})`
+            : `5-hour limit (resets ${shortTime(u.sessionReset)})`;
+        yield { type: "text", delta: `We've reached your Claude ${which}. I can't think until it resets.` };
+        yield { type: "final", messages };
+        return;
+      }
+      const hot = Math.max(u.weekly, u.session);
+      if (hot >= 90 && Date.now() - lastWarnAt > 15 * 60_000) {
+        lastWarnAt = Date.now();
+        yield { type: "text", delta: `Heads up — you're at ${Math.round(hot)}% of your Claude limit. ` };
+      }
+    }
+  }
 
   // The OAuth (subscription) path requires the Claude Code system identifier as
   // the first system block; our real instructions follow it.
