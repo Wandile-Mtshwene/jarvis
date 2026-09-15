@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+Jarvis.app
+
+# desktop app bundle (built via scripts/build-app.sh)
+Jarvis.app
+.jarvis-app

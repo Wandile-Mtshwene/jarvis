@@ -1,0 +1,179 @@
+// Jarvis's brain — the agentic loop. Streams text, runs tools locally, and
+// pauses for confirmation on risky/outward actions.
+
+import Anthropic from "@anthropic-ai/sdk";
+import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { tools, execTool, needsConfirm } from "./tools";
+import { createPending } from "./pending";
+
+const MODEL = "claude-opus-4-8";
+
+function buildSystem(profile?: { name?: string; notes?: string }): string {
+  const who = profile?.name
+    ? `\nThe person you're speaking with is ${profile.name}. Address them by name naturally (not every sentence).`
+    : "";
+  const notes = profile?.notes ? `\nThings to remember about them: ${profile.notes}` : "";
+  return `You are J.A.R.V.I.S, a witty, capable voice-and-text assistant living on the user's Mac.
+You can control the machine through tools: shell, AppleScript (Mail/Calendar/Notes/Music/Finder), files, clipboard, and more.
+
+Style:
+- You are usually SPOKEN aloud. Keep replies short, natural, and conversational — one or two sentences unless asked for detail. No markdown, no bullet lists, no code fences when speaking.
+- Be proactive and decisive. Pick sensible defaults instead of asking clarifying questions for small things.
+- Address the user lightly as "sir" or by name occasionally — never obsequious.
+
+Tools:
+- Prefer a dedicated tool over shell when one fits (e.g. get_calendar, open_app, system_info).
+- Destructive or outward actions (deleting, sending, pushing, paying, creating events) will prompt the user to confirm — just call the tool; the system handles the gate. If denied, acknowledge and stop.
+- After doing something, confirm it briefly ("Done — opened Spotify").
+Current time: ${new Date().toString()}.${who}${notes}`;
+}
+
+export type Msg = Anthropic.MessageParam;
+
+export type AgentEvent =
+  | { type: "state"; state: "thinking" | "speaking" }
+  | { type: "text"; delta: string }
+  | { type: "tool"; name: string; status: "running" | "ok" | "denied"; detail?: string }
+  | { type: "confirm"; id: string; tool: string; reason: string }
+  | { type: "final"; messages: Msg[] }
+  | { type: "error"; message: string };
+
+// Read the Claude Code OAuth token that macOS Keychain stores for the user's
+// subscription. Claude Code keeps it fresh, so we read it per request.
+function keychainToken(): string | null {
+  try {
+    const out = execFileSync(
+      "/usr/bin/security",
+      ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+      { encoding: "utf8" },
+    );
+    const j = JSON.parse(out);
+    return j?.claudeAiOauth?.accessToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Prefer a console API key; otherwise fall back to the subscription token.
+function makeClient(): { client: Anthropic; oauth: boolean } | null {
+  if (process.env.ANTHROPIC_API_KEY) {
+    return { client: new Anthropic(), oauth: false };
+  }
+  const tok = keychainToken();
+  if (tok) {
+    return {
+      client: new Anthropic({
+        authToken: tok,
+        defaultHeaders: { "anthropic-beta": "oauth-2025-04-20" },
+      }),
+      oauth: true,
+    };
+  }
+  return null;
+}
+
+export async function* runAgent(
+  history: Msg[],
+  profile?: { name?: string; notes?: string },
+): AsyncGenerator<AgentEvent> {
+  const messages: Msg[] = [...history];
+
+  const made = makeClient();
+  if (!made) {
+    yield {
+      type: "text",
+      delta:
+        "My brain isn't connected. Sign into Claude Code (so the subscription token is in your Keychain), or add ANTHROPIC_API_KEY to .env.local, then restart me.",
+    };
+    yield { type: "final", messages };
+    return;
+  }
+  const { client, oauth } = made;
+
+  // The OAuth (subscription) path requires the Claude Code system identifier as
+  // the first system block; our real instructions follow it.
+  const jarvis = buildSystem(profile);
+  const system = oauth
+    ? [
+        { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        { type: "text" as const, text: jarvis },
+      ]
+    : jarvis;
+
+  try {
+    for (let turn = 0; turn < 12; turn++) {
+      yield { type: "state", state: "thinking" };
+
+      const stream = client.messages.stream({
+        model: MODEL,
+        max_tokens: 4096,
+        system,
+        tools: tools as Anthropic.Tool[],
+        thinking: { type: "adaptive" },
+        output_config: { effort: "medium" },
+        messages,
+      });
+
+      let started = false;
+      for await (const event of stream) {
+        if (
+          event.type === "content_block_delta" &&
+          event.delta.type === "text_delta"
+        ) {
+          if (!started) {
+            started = true;
+            yield { type: "state", state: "speaking" };
+          }
+          yield { type: "text", delta: event.delta.text };
+        }
+      }
+
+      const final = await stream.finalMessage();
+      messages.push({ role: "assistant", content: final.content });
+
+      if (final.stop_reason !== "tool_use") break;
+
+      const toolUses = final.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+      );
+      const results: Anthropic.ToolResultBlockParam[] = [];
+
+      for (const tu of toolUses) {
+        const input = (tu.input ?? {}) as Record<string, unknown>;
+        const gate = needsConfirm(tu.name, input);
+
+        if (gate.confirm) {
+          const id = randomUUID();
+          yield { type: "confirm", id, tool: tu.name, reason: gate.reason };
+          const approved = await createPending(id, tu.name, input, gate.reason);
+          if (!approved) {
+            yield { type: "tool", name: tu.name, status: "denied" };
+            results.push({
+              type: "tool_result",
+              tool_use_id: tu.id,
+              content: "User denied this action. Do not retry it.",
+              is_error: true,
+            });
+            continue;
+          }
+        }
+
+        yield { type: "tool", name: tu.name, status: "running" };
+        const out = await execTool(tu.name, input);
+        yield { type: "tool", name: tu.name, status: "ok", detail: out.slice(0, 120) };
+        results.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: out || "(no output)",
+        });
+      }
+
+      messages.push({ role: "user", content: results });
+    }
+
+    yield { type: "final", messages };
+  } catch (e) {
+    yield { type: "error", message: e instanceof Error ? e.message : String(e) };
+  }
+}

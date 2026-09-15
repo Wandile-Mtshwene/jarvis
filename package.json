@@ -5,12 +5,18 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "telegram": "node scripts/telegram.mjs",
+    "tunnel": "bash scripts/tunnel.sh",
+    "app": "bash scripts/build-app.sh"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
+    "lucide-react": "^1.46.0",
     "next": "16.3.5",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
