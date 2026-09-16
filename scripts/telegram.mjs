@@ -8,6 +8,17 @@
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ONLY_CHAT = process.env.TELEGRAM_CHAT_ID; // optional allowlist
 const BASE = process.env.JARVIS_URL || "http://localhost:3000";
+const JARVIS_TOKEN = process.env.JARVIS_TOKEN; // needed only if JARVIS_URL is remote
+// Personalize Jarvis over Telegram (same profile the Eye passes).
+const PROFILE = {
+  ...(process.env.JARVIS_NAME ? { name: process.env.JARVIS_NAME } : {}),
+  ...(process.env.JARVIS_NOTES ? { notes: process.env.JARVIS_NOTES } : {}),
+};
+
+const brainHeaders = () => ({
+  "content-type": "application/json",
+  ...(JARVIS_TOKEN ? { authorization: `Bearer ${JARVIS_TOKEN}` } : {}),
+});
 
 if (!TOKEN) {
   console.error("Set TELEGRAM_BOT_TOKEN");
@@ -32,8 +43,8 @@ async function ask(chat, userText) {
 
   const res = await fetch(`${BASE}/api/agent`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ messages: history }),
+    headers: brainHeaders(),
+    body: JSON.stringify({ messages: history, profile: PROFILE }),
   });
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -86,7 +97,7 @@ for (;;) {
         const approved = act === "ok";
         await fetch(`${BASE}/api/confirm`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: brainHeaders(),
           body: JSON.stringify({ id, approved }),
         }).catch(() => {});
         await api("answerCallbackQuery", {

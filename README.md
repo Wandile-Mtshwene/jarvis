@@ -60,10 +60,12 @@ click **Install** in the address bar to install the PWA.)
 ## Phone
 
 - **Telegram:** `TELEGRAM_BOT_TOKEN=... npm run telegram` — then message the bot.
-  (Risky actions are declined over Telegram and must be confirmed on the Eye.)
+  Risky actions surface inline **Approve / Deny** buttons right in the chat.
 - **Full Eye on your phone:** `npm run tunnel` (needs `brew install cloudflared`)
   prints a public `https://…trycloudflare.com` URL. Open it on your iPhone and
-  *Add to Home Screen* to install the PWA.
+  *Add to Home Screen* to install the PWA. Set **`JARVIS_TOKEN`** first (see
+  Safety) — the tunnel won't serve the API without it, and the Eye asks you to
+  paste it once on first remote load.
 
 ## Layout
 
@@ -79,4 +81,11 @@ click **Install** in the address bar to install the PWA.)
 
 Jarvis has real power over your Mac. The confirm gate (`lib/tools.ts` →
 `needsConfirm`) is a heuristic denylist, not a sandbox — review it, and don't
-run Jarvis with `sudo` or expose the tunnel URL publicly. It's a personal tool.
+run Jarvis with `sudo`. It's a personal tool.
+
+**Remote access requires a token.** Requests over the Cloudflare tunnel must
+carry `JARVIS_TOKEN`; localhost is trusted and never needs it. If the tunnel is
+running but no token is set, the API refuses remote calls (fail-closed) so a
+leaked tunnel URL can't become an open remote shell. Generate one with
+`openssl rand -hex 24`, put it in `.env.local`, and restart. The auth check
+lives in `lib/auth.ts`.

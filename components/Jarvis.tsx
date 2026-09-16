@@ -28,6 +28,30 @@ function getSRCtor(): (new () => SR) | null {
   return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
 
+// When reached over the Cloudflare tunnel, the API requires JARVIS_TOKEN. We
+// keep it in localStorage (on localhost it's simply never needed / never asked).
+function getToken(): string {
+  try {
+    return localStorage.getItem("jarvis.token") || "";
+  } catch {
+    return "";
+  }
+}
+function promptForToken(): string {
+  const t = window.prompt("This Jarvis needs an access token (JARVIS_TOKEN). Paste it:")?.trim();
+  if (t) {
+    try {
+      localStorage.setItem("jarvis.token", t);
+    } catch {}
+    return t;
+  }
+  return "";
+}
+function authHeaders(): Record<string, string> {
+  const t = getToken();
+  return t ? { authorization: `Bearer ${t}` } : {};
+}
+
 export default function Jarvis() {
   const [state, setState] = useState<EyeState>("idle");
   const [reply, setReply] = useState("");
@@ -135,11 +159,15 @@ export default function Jarvis() {
 
       let full = "";
       try {
-        const res = await fetch("/api/agent", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ messages: history.current, profile: profileRef.current }),
-        });
+        const post = () =>
+          fetch("/api/agent", {
+            method: "POST",
+            headers: { "content-type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ messages: history.current, profile: profileRef.current }),
+          });
+        let res = await post();
+        // Remote access (over the tunnel) needs a token — ask for it once and retry.
+        if (res.status === 401 && promptForToken()) res = await post();
 
         // If the brain isn't reachable / the key is missing, the body won't be
         // an SSE stream — read it as text and show it instead of crashing.
@@ -444,7 +472,7 @@ export default function Jarvis() {
     if (!confirm) return;
     await fetch("/api/confirm", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       body: JSON.stringify({ id: confirm.id, approved }),
     });
     setConfirm(null);

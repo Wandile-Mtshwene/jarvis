@@ -1,10 +1,14 @@
 import { runAgent, type Msg } from "@/lib/agent";
+import { checkAuth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // POST { messages: Msg[] } -> Server-Sent Events stream of AgentEvent objects.
 export async function POST(req: Request) {
+  const auth = checkAuth(req);
+  if (!auth.ok) return new Response(auth.message, { status: auth.status });
+
   const { messages, profile } = (await req.json()) as {
     messages: Msg[];
     profile?: { name?: string; notes?: string };
