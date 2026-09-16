@@ -7,7 +7,27 @@ import { execFileSync } from "node:child_process";
 import { tools, execTool, needsConfirm } from "./tools";
 import { createPending } from "./pending";
 
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-sonnet-4-6";
+
+// Cap how much history we send so a long session doesn't balloon cost/latency
+// or eventually blow the context window. We keep the most recent messages but
+// back up to a real user turn (a plain-string user message, not a tool_result)
+// so we never start mid tool_use/tool_result pair, which the API rejects.
+const MAX_HISTORY = 24;
+
+function isUserTurnBoundary(m: Msg): boolean {
+  return m.role === "user" && typeof m.content === "string";
+}
+
+function capHistory(messages: Msg[]): Msg[] {
+  if (messages.length <= MAX_HISTORY) return messages;
+  let start = messages.length - MAX_HISTORY;
+  while (start < messages.length && !isUserTurnBoundary(messages[start])) start++;
+  // If no clean boundary was found in the window, keep the last message only if
+  // it's a valid start; otherwise fall back to the whole tail we computed.
+  if (start >= messages.length) start = messages.length - MAX_HISTORY;
+  return messages.slice(start);
+}
 
 function buildSystem(profile?: { name?: string; notes?: string }): string {
   const who = profile?.name
@@ -115,7 +135,7 @@ export async function* runAgent(
   history: Msg[],
   profile?: { name?: string; notes?: string },
 ): AsyncGenerator<AgentEvent> {
-  const messages: Msg[] = [...history];
+  const messages: Msg[] = capHistory([...history]);
 
   const made = makeClient();
   if (!made) {
